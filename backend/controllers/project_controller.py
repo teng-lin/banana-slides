@@ -391,8 +391,8 @@ def generate_images(project_id):
         if not project:
             return not_found('Project')
         
-        if project.status not in ['DESCRIPTIONS_GENERATED', 'OUTLINE_GENERATED']:
-            return bad_request("Project must have descriptions generated first")
+        # if project.status not in ['DESCRIPTIONS_GENERATED', 'OUTLINE_GENERATED']:
+        #     return bad_request("Project must have descriptions generated first")
         
         # Get pages
         pages = Page.query.filter_by(project_id=project_id).order_by(Page.order_index).all()
