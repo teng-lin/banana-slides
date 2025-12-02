@@ -1,6 +1,7 @@
 """
 AI Service - handles all AI model interactions
 Based on demo.py and gemini_genai.py
+TODO: use structured output API
 """
 import os
 import json

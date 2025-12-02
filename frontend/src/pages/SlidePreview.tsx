@@ -1,4 +1,5 @@
-import React, { useState, useEffect } from 'react';
+// TODO: split components
+import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate, useParams, useLocation } from 'react-router-dom';
 import {
   Home,
@@ -66,6 +67,22 @@ export const SlidePreview: React.FC = () => {
   const [extraRequirements, setExtraRequirements] = useState<string>('');
   const [isSavingRequirements, setIsSavingRequirements] = useState(false);
   const [isExtraRequirementsExpanded, setIsExtraRequirementsExpanded] = useState(false);
+  // 每页编辑参数缓存（前端会话内缓存，便于重复执行）
+  const [editContextByPage, setEditContextByPage] = useState<Record<string, {
+    prompt: string;
+    contextImages: {
+      useTemplate: boolean;
+      descImageUrls: string[];
+      uploadedFiles: File[];
+    };
+  }>>({});
+
+  // 预览图矩形选择状态（编辑弹窗内）
+  const imageRef = useRef<HTMLImageElement | null>(null);
+  const [isRegionSelectionMode, setIsRegionSelectionMode] = useState(false);
+  const [isSelectingRegion, setIsSelectingRegion] = useState(false);
+  const [selectionStart, setSelectionStart] = useState<{ x: number; y: number } | null>(null);
+  const [selectionRect, setSelectionRect] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
   const { show, ToastContainer } = useToast();
   const { confirm, ConfirmDialog } = useConfirm();
 
@@ -232,17 +249,38 @@ export const SlidePreview: React.FC = () => {
   };
 
   const handleEditPage = () => {
-    setEditPrompt('');
+    if (!currentProject) return;
+    const page = currentProject.pages[selectedIndex];
+    const pageId = page?.id;
+
     setIsOutlineExpanded(false);
     setIsDescriptionExpanded(false);
-    
-    // 初始化上下文图片选择
-    setSelectedContextImages({
-      useTemplate: false,
-      descImageUrls: [],
-      uploadedFiles: [],
-    });
-    
+
+    if (pageId && editContextByPage[pageId]) {
+      // 恢复该页上次编辑的内容和图片选择
+      const cached = editContextByPage[pageId];
+      setEditPrompt(cached.prompt);
+      setSelectedContextImages({
+        useTemplate: cached.contextImages.useTemplate,
+        descImageUrls: [...cached.contextImages.descImageUrls],
+        uploadedFiles: [...cached.contextImages.uploadedFiles],
+      });
+    } else {
+      // 首次编辑该页，使用默认值
+      setEditPrompt('');
+      setSelectedContextImages({
+        useTemplate: false,
+        descImageUrls: [],
+        uploadedFiles: [],
+      });
+    }
+
+    // 打开编辑弹窗时，清空上一次的选区和模式
+    setIsRegionSelectionMode(false);
+    setSelectionStart(null);
+    setSelectionRect(null);
+    setIsSelectingRegion(false);
+
     setIsEditModalOpen(true);
   };
 
@@ -251,7 +289,8 @@ export const SlidePreview: React.FC = () => {
     
     const page = currentProject.pages[selectedIndex];
     if (!page.id) return;
-    
+
+    // 调用后端编辑接口
     await editPageImage(
       page.id,
       editPrompt,
@@ -263,6 +302,20 @@ export const SlidePreview: React.FC = () => {
           : undefined,
       }
     );
+
+    // 缓存当前页的编辑上下文，便于后续快速重复执行
+    setEditContextByPage((prev) => ({
+      ...prev,
+      [page.id!]: {
+        prompt: editPrompt,
+        contextImages: {
+          useTemplate: selectedContextImages.useTemplate,
+          descImageUrls: [...selectedContextImages.descImageUrls],
+          uploadedFiles: [...selectedContextImages.uploadedFiles],
+        },
+      },
+    }));
+
     setIsEditModalOpen(false);
   };
 
@@ -279,6 +332,135 @@ export const SlidePreview: React.FC = () => {
       ...prev,
       uploadedFiles: prev.uploadedFiles.filter((_, i) => i !== index),
     }));
+  };
+
+  // 编辑弹窗打开时，实时把输入与图片选择写入缓存（前端会话内）
+  useEffect(() => {
+    if (!isEditModalOpen || !currentProject) return;
+    const page = currentProject.pages[selectedIndex];
+    const pageId = page?.id;
+    if (!pageId) return;
+
+    setEditContextByPage((prev) => ({
+      ...prev,
+      [pageId]: {
+        prompt: editPrompt,
+        contextImages: {
+          useTemplate: selectedContextImages.useTemplate,
+          descImageUrls: [...selectedContextImages.descImageUrls],
+          uploadedFiles: [...selectedContextImages.uploadedFiles],
+        },
+      },
+    }));
+  }, [isEditModalOpen, currentProject, selectedIndex, editPrompt, selectedContextImages]);
+
+  // ========== 预览图矩形选择相关逻辑（编辑弹窗内） ==========
+  const handleSelectionMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!isRegionSelectionMode || !imageRef.current) return;
+    const rect = imageRef.current.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    if (x < 0 || y < 0 || x > rect.width || y > rect.height) return;
+    setIsSelectingRegion(true);
+    setSelectionStart({ x, y });
+    setSelectionRect(null);
+  };
+
+  const handleSelectionMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!isRegionSelectionMode || !isSelectingRegion || !selectionStart || !imageRef.current) return;
+    const rect = imageRef.current.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    const clampedX = Math.max(0, Math.min(x, rect.width));
+    const clampedY = Math.max(0, Math.min(y, rect.height));
+
+    const left = Math.min(selectionStart.x, clampedX);
+    const top = Math.min(selectionStart.y, clampedY);
+    const width = Math.abs(clampedX - selectionStart.x);
+    const height = Math.abs(clampedY - selectionStart.y);
+
+    setSelectionRect({ left, top, width, height });
+  };
+
+  const handleSelectionMouseUp = async () => {
+    if (!isRegionSelectionMode || !isSelectingRegion || !selectionRect || !imageRef.current) {
+      setIsSelectingRegion(false);
+      setSelectionStart(null);
+      return;
+    }
+
+    // 结束拖拽，但保留选中的矩形，直到用户手动退出区域选图模式
+    setIsSelectingRegion(false);
+    setSelectionStart(null);
+
+    try {
+      const img = imageRef.current;
+      const { left, top, width, height } = selectionRect;
+      if (width < 10 || height < 10) {
+        // 选区太小，忽略
+        return;
+      }
+
+      // 将选区从展示尺寸映射到原始图片尺寸
+      const naturalWidth = img.naturalWidth;
+      const naturalHeight = img.naturalHeight;
+      const displayWidth = img.clientWidth;
+      const displayHeight = img.clientHeight;
+
+      if (!naturalWidth || !naturalHeight || !displayWidth || !displayHeight) return;
+
+      const scaleX = naturalWidth / displayWidth;
+      const scaleY = naturalHeight / displayHeight;
+
+      const sx = left * scaleX;
+      const sy = top * scaleY;
+      const sWidth = width * scaleX;
+      const sHeight = height * scaleY;
+
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(sWidth));
+      canvas.height = Math.max(1, Math.round(sHeight));
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+
+      try {
+        ctx.drawImage(
+          img,
+          sx,
+          sy,
+          sWidth,
+          sHeight,
+          0,
+          0,
+          canvas.width,
+          canvas.height
+        );
+
+        canvas.toBlob((blob) => {
+          if (!blob) return;
+          const file = new File([blob], `crop-${Date.now()}.png`, { type: 'image/png' });
+          // 把选中区域作为额外参考图片加入上传列表
+          setSelectedContextImages((prev) => ({
+            ...prev,
+            uploadedFiles: [...prev.uploadedFiles, file],
+          }));
+          // 给用户一个明显反馈：选区已作为图片加入下方“上传图片”
+          show({
+            message: '已将选中区域添加为参考图片，可在下方“上传图片”中查看与删除',
+            type: 'success',
+          });
+        }, 'image/png');
+      } catch (e: any) {
+        console.error('裁剪选中区域失败（可能是跨域图片导致 canvas 被污染）:', e);
+        show({
+          message: '无法从当前图片裁剪区域（浏览器安全限制）。可以尝试手动上传参考图片。',
+          type: 'error',
+        });
+      }
+    } finally {
+      // 不清理 selectionRect，让选区在界面上持续显示
+    }
   };
 
   const handleExport = async (type: 'pptx' | 'pdf') => {
@@ -587,7 +769,8 @@ export const SlidePreview: React.FC = () => {
                       <img
                         src={imageUrl}
                         alt={`Slide ${selectedIndex + 1}`}
-                        className="w-full h-full object-contain"
+                        className="w-full h-full object-contain select-none"
+                        draggable={false}
                       />
                     ) : (
                       <div className="w-full h-full flex items-center justify-center bg-gray-100">
@@ -729,14 +912,54 @@ export const SlidePreview: React.FC = () => {
         size="lg"
       >
         <div className="space-y-4">
-          {/* 图片 */}
-          <div className="aspect-video bg-gray-100 rounded-lg overflow-hidden">
+          {/* 图片（支持矩形区域选择） */}
+          <div
+            className="aspect-video bg-gray-100 rounded-lg overflow-hidden relative"
+            onMouseDown={handleSelectionMouseDown}
+            onMouseMove={handleSelectionMouseMove}
+            onMouseUp={handleSelectionMouseUp}
+            onMouseLeave={handleSelectionMouseUp}
+          >
             {imageUrl && (
-              <img
-                src={imageUrl}
-                alt="Current slide"
-                className="w-full h-full object-contain"
-              />
+              <>
+                {/* 左上角：区域选图模式开关 */}
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    // 切换矩形选择模式
+                    setIsRegionSelectionMode((prev) => !prev);
+                    // 切模式时清空当前选区
+                    setSelectionStart(null);
+                    setSelectionRect(null);
+                    setIsSelectingRegion(false);
+                  }}
+                  className="absolute top-2 left-2 z-10 px-2 py-1 rounded bg-white/80 text-[10px] text-gray-700 hover:bg-banana-50 shadow-sm flex items-center gap-1"
+                >
+                  <Sparkles size={12} />
+                  <span>{isRegionSelectionMode ? '结束区域选图' : '区域选图'}</span>
+                </button>
+
+                <img
+                  ref={imageRef}
+                  src={imageUrl}
+                  alt="Current slide"
+                  className="w-full h-full object-contain select-none"
+                  draggable={false}
+                  crossOrigin="anonymous"
+                />
+                {selectionRect && (
+                  <div
+                    className="absolute border-2 border-banana-500 bg-banana-400/10 pointer-events-none"
+                    style={{
+                      left: selectionRect.left,
+                      top: selectionRect.top,
+                      width: selectionRect.width,
+                      height: selectionRect.height,
+                    }}
+                  />
+                )}
+              </>
             )}
           </div>
 
